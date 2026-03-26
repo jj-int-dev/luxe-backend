@@ -1,0 +1,7 @@
+- Thin handlers
+- Services contain logic
+- Repositories handle DB
+- Use dependency injection
+- Return structured errors
+- Use shared JSON response helper when returning responses
+- Do not call c.JSON directly in handlers
