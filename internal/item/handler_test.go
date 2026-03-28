@@ -284,6 +284,13 @@ func TestGetItems_Returns200_EmptyArray_WhenNoCategoryMatches(t *testing.T) {
 	}
 }
 
+func TestGetItems_CursorNotInFilteredSet_Returns400(t *testing.T) {
+    rec := getItems(t, "category=cars&cursor=house-1")
+    if rec.Code != http.StatusBadRequest {
+        t.Errorf("expected 400, got %d", rec.Code)
+    }
+}
+
 func TestGetItems_Returns400_WhenCategoryIsInvalid(t *testing.T) {
 	rec := getItems(t, "category=watches")
 	if rec.Code != http.StatusBadRequest {
