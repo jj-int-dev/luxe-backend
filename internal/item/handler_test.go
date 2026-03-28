@@ -42,42 +42,26 @@ func getItems(t *testing.T, query string) *httptest.ResponseRecorder {
 
 // --- Happy path: no category filter ---
 
-func TestGetItems_Returns200_WithAllItems(t *testing.T) {
+func TestGetItems_ReturnsAllItems(t *testing.T) {
 	rec := getItems(t, "")
+
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
-}
 
-func TestGetItems_ReturnsJSON_Array(t *testing.T) {
-	rec := getItems(t, "")
 	var items []map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
-		t.Fatalf("response is not a JSON array: %v", err)
+		t.Fatalf("invalid json: %v", err)
 	}
-}
 
-func TestGetItems_ReturnsAllSeededItems(t *testing.T) {
-	rec := getItems(t, "")
-	var items []map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
-		t.Fatalf("could not unmarshal response: %v", err)
-	}
 	if len(items) < 5 {
-		t.Errorf("expected at least 5 items, got %d", len(items))
-	}
-}
+    t.Errorf("expected >=5 items, got %d", len(items))
+  }
 
-func TestGetItems_EachItem_HasRequiredFields(t *testing.T) {
-	rec := getItems(t, "")
-	var items []map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
-		t.Fatalf("could not unmarshal response: %v", err)
-	}
 	for _, it := range items {
 		for _, field := range []string{"id", "title", "price", "image_url"} {
 			if _, ok := it[field]; !ok {
-				t.Errorf("item missing field %q: %v", field, it)
+				t.Errorf("missing field %s", field)
 			}
 		}
 	}
@@ -85,15 +69,13 @@ func TestGetItems_EachItem_HasRequiredFields(t *testing.T) {
 
 // --- Happy path: valid category filter ---
 
-func TestGetItems_Returns200_WhenCategoryIsCars(t *testing.T) {
+func TestGetItems_ReturnsCars(t *testing.T) {
 	rec := getItems(t, "category=cars")
+
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
-}
 
-func TestGetItems_FiltersByCars_ReturnsOnlyCars(t *testing.T) {
-	rec := getItems(t, "category=cars")
 	var items []map[string]interface{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
 		t.Fatalf("could not unmarshal response: %v", err)
@@ -101,12 +83,23 @@ func TestGetItems_FiltersByCars_ReturnsOnlyCars(t *testing.T) {
 	if len(items) == 0 {
 		t.Fatal("expected at least one car item, got none")
 	}
+
 }
 
-func TestGetItems_Returns200_WhenCategoryIsHouses(t *testing.T) {
+func TestGetItems_ReturnsHouses(t *testing.T) {
 	rec := getItems(t, "category=houses")
+
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var items []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("could not unmarshal response: %v", err)
+	}
+
+	if len(items) == 0 {
+		t.Fatal("expected at least one house item, got none")
 	}
 }
 
@@ -133,13 +126,6 @@ func TestGetItems_Returns400_WhenCategoryIsInvalid(t *testing.T) {
 	rec := getItems(t, "category=watches")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rec.Code)
-	}
-}
-
-func TestGetItems_Returns400_WhenCategoryIsRandomString(t *testing.T) {
-	rec := getItems(t, "category=Cars") // case-sensitive
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d; category validation should be case-sensitive", rec.Code)
 	}
 }
 

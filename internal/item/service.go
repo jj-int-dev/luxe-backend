@@ -1,6 +1,9 @@
 package item
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Service defines the business-logic contract for items.
 type Service interface {
@@ -20,8 +23,14 @@ func NewService(repo Repository) Service {
 // If category is non-nil and not a recognised value, ErrInvalidCategory
 // is returned. A nil category means "no filter".
 func (s *service) GetItems(ctx context.Context, category *string) ([]Item, error) {
-	if category != nil && !IsValidCategory(*category) {
-		return nil, ErrInvalidCategory
+	if category != nil {
+    normalized := strings.ToLower(*category)
+
+    if !IsValidCategory(normalized) {
+        return nil, ErrInvalidCategory
+    }
+
+    *category = normalized
 	}
 
 	all, err := s.repo.GetAll(ctx)
