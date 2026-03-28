@@ -21,6 +21,12 @@ var validCategories = map[string]bool{
 // ErrInvalidCategory is returned when an unrecognised category is requested.
 var ErrInvalidCategory = errors.New("category must be one of: cars, houses, jewelry")
 
+// ErrInvalidCursor is returned when the provided cursor ID does not match any item.
+var ErrInvalidCursor = errors.New("cursor not found")
+
+// ErrInvalidLimit is returned when the requested limit is ≤ 0.
+var ErrInvalidLimit = errors.New("limit must be between 1 and 50")
+
 // IsValidCategory reports whether the given category string is allowed.
 func IsValidCategory(c string) bool {
 	return validCategories[c]
