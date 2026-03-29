@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"luxe-backend/internal/item"
@@ -306,5 +307,236 @@ func TestGetItems_Returns400_ResponseBody_ContainsError(t *testing.T) {
 	}
 	if _, ok := body["error"]; !ok {
 		t.Errorf("expected 'error' key in response body, got %v", body)
+	}
+}
+
+// ─── Dream Mode: seen_ids ─────────────────────────────────────────────────────
+
+// TestGetItems_SeenIDs_ExcludesSeenItems verifies that items whose IDs appear
+// in the seen_ids param are absent from the response.
+func TestGetItems_SeenIDs_ExcludesSeenItems(t *testing.T) {
+	rec := getItems(t, "category=cars&seen_ids=car-01,car-02")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	resp := parseItemsResponse(t, rec)
+	seenSet := map[string]bool{"car-01": true, "car-02": true}
+	for _, it := range resp.Items {
+		id := it["id"].(string)
+		if seenSet[id] {
+			t.Errorf("item %q should have been excluded via seen_ids", id)
+		}
+	}
+}
+
+// TestGetItems_SeenIDs_AllItemsSeen_ReturnsEmptyList verifies that when every
+// item in the category has been seen, the response is an empty list with a nil
+// next_cursor.
+func TestGetItems_SeenIDs_AllItemsSeen_ReturnsEmptyList(t *testing.T) {
+	// All 7 cars are passed as seen_ids.
+	seenIDs := "car-01,car-02,car-03,car-04,car-05,car-06,car-07"
+	rec := getItems(t, "category=cars&seen_ids="+seenIDs)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	resp := parseItemsResponse(t, rec)
+	if len(resp.Items) != 0 {
+		t.Errorf("expected 0 items when all cars are seen, got %d", len(resp.Items))
+	}
+	if resp.NextCursor != nil {
+		t.Errorf("expected nil next_cursor when pool is empty, got %q", *resp.NextCursor)
+	}
+}
+
+// TestGetItems_Shuffle_Deterministic verifies that two identical requests always
+// return items in the same order (deterministic seeded shuffle).
+func TestGetItems_Shuffle_Deterministic(t *testing.T) {
+	rec1 := getItems(t, "category=cars&seen_ids=car-01&limit=6")
+	rec2 := getItems(t, "category=cars&seen_ids=car-01&limit=6")
+
+	resp1 := parseItemsResponse(t, rec1)
+	resp2 := parseItemsResponse(t, rec2)
+
+	if len(resp1.Items) != len(resp2.Items) {
+		t.Fatalf("identical requests returned different item counts: %d vs %d",
+			len(resp1.Items), len(resp2.Items))
+	}
+	for i := range resp1.Items {
+		id1 := resp1.Items[i]["id"].(string)
+		id2 := resp2.Items[i]["id"].(string)
+		if id1 != id2 {
+			t.Errorf("position %d: first call got %q, second call got %q (non-deterministic shuffle)",
+				i, id1, id2)
+		}
+	}
+}
+
+// TestGetItems_Shuffle_DifferentSeenIDs_DifferentOrder verifies that different
+// seen_ids values produce different shuffle orderings of the remaining items.
+func TestGetItems_Shuffle_DifferentSeenIDs_DifferentOrder(t *testing.T) {
+	// Pool for req1: cars minus car-07 = [car-01..car-06]
+	// Pool for req2: cars minus car-06 = [car-01..car-05, car-07]
+	// Common items: car-01..car-05 should appear in different relative positions.
+	rec1 := getItems(t, "category=cars&seen_ids=car-07&limit=5")
+	rec2 := getItems(t, "category=cars&seen_ids=car-06&limit=5")
+
+	resp1 := parseItemsResponse(t, rec1)
+	resp2 := parseItemsResponse(t, rec2)
+
+	if len(resp1.Items) == 0 || len(resp2.Items) == 0 {
+		t.Skip("not enough items to compare")
+	}
+
+	// Build ordered lists of common items in each response.
+	set2 := make(map[string]bool, len(resp2.Items))
+	for _, it := range resp2.Items {
+		set2[it["id"].(string)] = true
+	}
+	var common1 []string
+	for _, it := range resp1.Items {
+		if set2[it["id"].(string)] {
+			common1 = append(common1, it["id"].(string))
+		}
+	}
+	set1 := make(map[string]bool, len(resp1.Items))
+	for _, it := range resp1.Items {
+		set1[it["id"].(string)] = true
+	}
+	var common2 []string
+	for _, it := range resp2.Items {
+		if set1[it["id"].(string)] {
+			common2 = append(common2, it["id"].(string))
+		}
+	}
+
+	if len(common1) < 2 {
+		t.Skip("not enough common items to compare order")
+	}
+
+	sameOrder := len(common1) == len(common2)
+	if sameOrder {
+		for i := range common1 {
+			if common1[i] != common2[i] {
+				sameOrder = false
+				break
+			}
+		}
+	}
+	if sameOrder {
+		t.Error("expected different item ordering for different seen_ids, but got identical order")
+	}
+}
+
+// TestGetItems_Pagination_NoDuplicatesAfterShuffle verifies that seen_ids-based
+// pagination produces no duplicates across pages even when the shuffle seed
+// changes between pages.
+func TestGetItems_Pagination_NoDuplicatesAfterShuffle(t *testing.T) {
+	// Page 1: no seen_ids, limit=3.
+	rec1 := getItems(t, "limit=3")
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("page 1 expected 200, got %d", rec1.Code)
+	}
+	resp1 := parseItemsResponse(t, rec1)
+	if len(resp1.Items) == 0 {
+		t.Fatal("page 1 returned no items")
+	}
+
+	// Collect page-1 IDs for seen_ids param on page 2.
+	ids1 := make([]string, 0, len(resp1.Items))
+	for _, it := range resp1.Items {
+		ids1 = append(ids1, it["id"].(string))
+	}
+	seenParam := strings.Join(ids1, ",")
+
+	// Page 2: pass page-1 items as seen_ids (Dream Mode accumulation).
+	rec2 := getItems(t, "limit=3&seen_ids="+seenParam)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("page 2 expected 200, got %d", rec2.Code)
+	}
+	resp2 := parseItemsResponse(t, rec2)
+
+	// No item from page 1 must appear on page 2.
+	seenSet := make(map[string]bool, len(ids1))
+	for _, id := range ids1 {
+		seenSet[id] = true
+	}
+	for _, it := range resp2.Items {
+		id := it["id"].(string)
+		if seenSet[id] {
+			t.Errorf("item %q appeared on both pages (seen_ids pagination)", id)
+		}
+	}
+}
+
+// TestGetItems_CursorValidation_SeenIDsFilteredOut verifies that a cursor
+// pointing to an item that was excluded by seen_ids returns 400.
+func TestGetItems_CursorValidation_SeenIDsFilteredOut(t *testing.T) {
+	// car-01 is in seen_ids, so it is removed from the pool before cursor lookup.
+	rec := getItems(t, "category=cars&seen_ids=car-01,car-02&cursor=car-01")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 when cursor is excluded by seen_ids, got %d", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("could not unmarshal error body: %v", err)
+	}
+	if _, ok := body["error"]; !ok {
+		t.Error("expected 'error' key in 400 response body")
+	}
+}
+
+// TestGetItems_CategoryAndSeenIDs_Combined verifies that category filtering and
+// seen_ids exclusion work correctly together.
+func TestGetItems_CategoryAndSeenIDs_Combined(t *testing.T) {
+	// 7 cars seeded; exclude 3 → at most 4 cars should be returned.
+	rec := getItems(t, "category=cars&seen_ids=car-01,car-02,car-03&limit=10")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	resp := parseItemsResponse(t, rec)
+
+	excluded := map[string]bool{"car-01": true, "car-02": true, "car-03": true}
+	for _, it := range resp.Items {
+		id := it["id"].(string)
+		if excluded[id] {
+			t.Errorf("item %q should have been excluded via seen_ids", id)
+		}
+	}
+	// 7 cars total − 3 excluded = 4 remaining.
+	if len(resp.Items) > 4 {
+		t.Errorf("expected at most 4 items (7 cars − 3 seen), got %d", len(resp.Items))
+	}
+}
+
+// TestGetItems_DreamMode_ResponseShapeUnchanged verifies that adding seen_ids
+// does not alter the JSON response envelope shape.
+func TestGetItems_DreamMode_ResponseShapeUnchanged(t *testing.T) {
+	rec := getItems(t, "seen_ids=car-01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	for _, field := range []string{"items", "next_cursor"} {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("response missing top-level field %q", field)
+		}
+	}
+	items, ok := raw["items"].([]interface{})
+	if !ok {
+		t.Fatal("'items' is not an array")
+	}
+	for _, rawItem := range items {
+		obj, ok := rawItem.(map[string]interface{})
+		if !ok {
+			t.Fatal("item is not an object")
+		}
+		for _, f := range []string{"id", "title", "price", "image_url"} {
+			if _, ok := obj[f]; !ok {
+				t.Errorf("item missing field %q", f)
+			}
+		}
 	}
 }

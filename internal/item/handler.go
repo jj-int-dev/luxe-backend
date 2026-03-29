@@ -3,6 +3,7 @@ package item
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 
@@ -41,6 +42,7 @@ const defaultLimit = 10
 //   - category (optional): cars | houses | jewelry
 //   - cursor   (optional): ID of the last item seen on the previous page
 //   - limit    (optional): page size, default 10, max 50
+//   - seen_ids (optional): comma-separated item IDs to exclude (Dream Mode feed)
 func (h *Handler) GetItems(c echo.Context) error {
 	// ── Parse category ───────────────────────────────────────────────────────
 	var category *string
@@ -68,8 +70,20 @@ func (h *Handler) GetItems(c echo.Context) error {
 		limit = parsed
 	}
 
+	// ── Parse seen_ids ───────────────────────────────────────────────────────
+	var seenIDs []string
+	if raw := c.QueryParam("seen_ids"); raw != "" {
+		parts := strings.Split(raw, ",")
+		seenIDs = make([]string, 0, len(parts))
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				seenIDs = append(seenIDs, trimmed)
+			}
+		}
+	}
+
 	// ── Delegate to service ──────────────────────────────────────────────────
-	items, nextCursor, err := h.svc.GetItems(c.Request().Context(), category, cursor, limit)
+	items, nextCursor, err := h.svc.GetItems(c.Request().Context(), category, cursor, limit, seenIDs)
 	if err != nil {
 		switch err {
 		case ErrInvalidCategory, ErrInvalidCursor, ErrInvalidLimit:
