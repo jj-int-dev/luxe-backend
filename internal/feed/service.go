@@ -16,16 +16,19 @@ var _ Service = (*FeedService)(nil)
 const maxLimit = 50
 
 // FeedService is the canonical feed generation implementation.
-// It is the single authoritative source of feed logic:
 //
-//  1. validate limit & category
-//  2. fetch all items
-//  3. sort by ID (stable baseline)
-//  4. filter by category
-//  5. exclude seen_ids
-//  6. shuffle deterministically (seed = hash(category + sorted(seen_ids)))
-//  7. apply cursor
-//  8. apply limit / compute next cursor
+// Pipeline (in order):
+//
+//  1. validate limit
+//  2. validate & normalise category
+//  3. fetch all items from repository
+//  4. sort by ID (stable deterministic baseline)
+//  5. filter by category
+//  6. exclude seen_ids
+//  7. deterministic shuffle  ← establishes tie-breaker order for equal scores
+//  8. rank by score descending (stable sort; shuffle order preserved for ties)
+//  9. apply cursor (items strictly after cursor position)
+// 10. apply limit / compute next cursor
 type FeedService struct {
 	repo item.Repository
 }
@@ -39,7 +42,7 @@ func NewFeedService(repo item.Repository) *FeedService {
 // category and seenIDs.
 //
 // seenIDs are sorted before hashing so that the order in which the caller
-// provides them does not affect the seed (and therefore the shuffle).
+// provides them does not affect the seed (and therefore the shuffle or ranking).
 // The seed is intentionally independent of the cursor so that cursor-based
 // pagination remains stable across pages that share the same seen_ids.
 func dreamSeed(category *string, seenIDs []string) int64 {
@@ -63,6 +66,9 @@ func dreamSeed(category *string, seenIDs []string) int64 {
 // the given seed. The caller must ensure the input is in a stable order
 // (sorted by ID) before calling so that the same seed always produces the same
 // output regardless of underlying repository iteration order.
+//
+// In the new pipeline the shuffle runs before ranking and acts as the
+// tie-breaker for items with equal scores (via sort.SliceStable in rankItems).
 func shuffleItems(items []item.Item, seed int64) []item.Item {
 	out := make([]item.Item, len(items))
 	copy(out, items)
@@ -99,7 +105,10 @@ func (s *FeedService) GetFeed(ctx context.Context, input GetFeedInput) (GetFeedO
 		return GetFeedOutput{}, err
 	}
 
-	// ── 4. Sort deterministically by ID (stable baseline for shuffle) ────────
+	// ── 4. Sort deterministically by ID (stable baseline) ────────────────────
+	// This guarantees that shuffleItems + rankItems always operate on the same
+	// ordered input regardless of the repository's iteration order, which is
+	// essential for end-to-end determinism.
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].ID < all[j].ID
 	})
@@ -115,7 +124,7 @@ func (s *FeedService) GetFeed(ctx context.Context, input GetFeedInput) (GetFeedO
 		all = filtered
 	}
 
-	// ── 6. Exclude seen IDs (Dream Mode) ─────────────────────────────────────
+	// ── 6. Exclude seen IDs ───────────────────────────────────────────────────
 	if len(input.SeenIDs) > 0 {
 		seenSet := make(map[string]bool, len(input.SeenIDs))
 		for _, id := range input.SeenIDs {
@@ -130,16 +139,28 @@ func (s *FeedService) GetFeed(ctx context.Context, input GetFeedInput) (GetFeedO
 		all = filtered
 	}
 
-	// ── 7. Return empty when nothing remains ─────────────────────────────────
+	// ── Early exit when nothing remains ──────────────────────────────────────
 	if len(all) == 0 {
 		return GetFeedOutput{Items: []item.Item{}, NextCursor: nil}, nil
 	}
 
-	// ── 8. Shuffle deterministically ─────────────────────────────────────────
-	// Seed is derived from normalised category + seenIDs only (not the cursor)
-	// so that cursor-based pagination within the same seen_ids session is stable.
+	// Compute the session seed once; it drives both shuffle and ranking so that
+	// both components are coherent and stable across pages (cursor does not
+	// affect the seed).
 	seed := dreamSeed(normalizedCategory, input.SeenIDs)
+
+	// ── 7. Deterministic shuffle (establishes tie-breaker order) ─────────────
+	// Items are shuffled first so that equal-ranked items end up in a random
+	// (but deterministic) relative order rather than ID-sorted order.
+	// rankItems uses sort.SliceStable, which preserves this shuffled order for
+	// items that share the same score.
 	all = shuffleItems(all, seed)
+
+	// ── 8. Rank by score descending (stable: shuffle order is tie-breaker) ───
+	// Each item receives a composite score:
+	//   score = 0.6 × popularity(price) + 0.4 × deterministicRandom(id, seed)
+	// See ranking.go / computeItemScore for full details.
+	all = rankItems(all, seed)
 
 	// ── 9. Apply cursor (items strictly after the cursor position) ───────────
 	if input.Cursor != nil {
@@ -156,7 +177,7 @@ func (s *FeedService) GetFeed(ctx context.Context, input GetFeedInput) (GetFeedO
 		all = all[idx+1:]
 	}
 
-	// ── 10. Slice to limit and calculate next cursor ──────────────────────────
+	// ── 10. Slice to limit and compute next cursor ────────────────────────────
 	var nextCursor *string
 	if len(all) > input.Limit {
 		nc := all[input.Limit-1].ID

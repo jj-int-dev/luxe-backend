@@ -448,3 +448,283 @@ func TestFeedService_FullTraversal_NoDuplicates(t *testing.T) {
 		t.Errorf("expected 12 total items across pages, got %d", totalItems)
 	}
 }
+
+// ── Ranking: higher-price items rank higher ───────────────────────────────────
+
+// TestFeedService_Ranking_HigherPriceItemsRankHigher verifies that the
+// price-based popularity component causes high-priced items to rank above
+// low-priced items when the price gap is large enough that no random
+// component can overturn the ordering.
+//
+// The score formula is:
+//
+//	score = 0.6 * (price / maxPrice) + 0.4 * deterministicRandom(id, seed)
+//
+// Monaco Penthouse (house-05, $25 000 000) → popularity = 1.0
+//
+//	min score = 0.6*1.0 + 0.4*0.0000 = 0.6000
+//
+// Beverly Hills Mansion (house-01, $5 500 000) → popularity = 0.22
+//
+//	max score = 0.6*0.22 + 0.4*0.9999 = 0.5320
+//
+// Since 0.6000 > 0.5320, Monaco Penthouse ALWAYS outranks Beverly Hills
+// for any seed value, making this test deterministic and unconditional.
+func TestFeedService_Ranking_HigherPriceItemsRankHigher(t *testing.T) {
+	svc := newSvc()
+
+	out, err := svc.GetFeed(ctx(), feed.GetFeedInput{
+		Category: strPtr("houses"),
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	monacoIdx := -1
+	beverlyIdx := -1
+	for i, it := range out.Items {
+		switch it.ID {
+		case "house-05": // Monaco Penthouse — $25 000 000
+			monacoIdx = i
+		case "house-01": // Beverly Hills Mansion — $5 500 000
+			beverlyIdx = i
+		}
+	}
+
+	if monacoIdx == -1 || beverlyIdx == -1 {
+		t.Fatal("expected both house-05 (Monaco) and house-01 (Beverly Hills) in the feed")
+	}
+	if monacoIdx >= beverlyIdx {
+		t.Errorf(
+			"ranking: expected Monaco Penthouse (house-05, pos %d) to rank before Beverly Hills (house-01, pos %d); "+
+				"price-based popularity should dominate",
+			monacoIdx, beverlyIdx,
+		)
+	}
+}
+
+// ── Ranking: determinism ──────────────────────────────────────────────────────
+
+// TestFeedService_Ranking_Deterministic verifies that ranking produces an
+// identical item order on repeated calls with identical inputs.
+func TestFeedService_Ranking_Deterministic(t *testing.T) {
+	tests := []struct {
+		name  string
+		input feed.GetFeedInput
+	}{
+		{
+			name:  "houses, no seen_ids",
+			input: feed.GetFeedInput{Category: strPtr("houses"), Limit: 10},
+		},
+		{
+			name:  "cars, one seen_id",
+			input: feed.GetFeedInput{Category: strPtr("cars"), SeenIDs: []string{"car-03"}, Limit: 10},
+		},
+		{
+			name:  "all categories, two seen_ids",
+			input: feed.GetFeedInput{SeenIDs: []string{"car-01", "house-01"}, Limit: 10},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newSvc()
+
+			out1, err1 := svc.GetFeed(ctx(), tc.input)
+			out2, err2 := svc.GetFeed(ctx(), tc.input)
+			if err1 != nil || err2 != nil {
+				t.Fatalf("unexpected errors: %v / %v", err1, err2)
+			}
+			if len(out1.Items) != len(out2.Items) {
+				t.Fatalf("got different item counts: %d vs %d", len(out1.Items), len(out2.Items))
+			}
+			for i := range out1.Items {
+				if out1.Items[i].ID != out2.Items[i].ID {
+					t.Errorf(
+						"position %d: first call=%q, second call=%q (ranking is non-deterministic)",
+						i, out1.Items[i].ID, out2.Items[i].ID,
+					)
+				}
+			}
+		})
+	}
+}
+
+// ── Ranking: same input → same order ─────────────────────────────────────────
+
+// TestFeedService_Ranking_SameInputSameOrder verifies that two independent
+// service instances backed by the same repository produce identical ranked
+// output for identical inputs — i.e., there is no global or instance state
+// that affects ordering.
+func TestFeedService_Ranking_SameInputSameOrder(t *testing.T) {
+	input := feed.GetFeedInput{
+		Category: strPtr("cars"),
+		SeenIDs:  []string{"car-02"},
+		Limit:    10,
+	}
+
+	svc1 := newSvc()
+	svc2 := newSvc()
+
+	out1, err1 := svc1.GetFeed(ctx(), input)
+	out2, err2 := svc2.GetFeed(ctx(), input)
+	if err1 != nil || err2 != nil {
+		t.Fatalf("unexpected errors: %v / %v", err1, err2)
+	}
+	if len(out1.Items) != len(out2.Items) {
+		t.Fatalf("different item counts from independent services: %d vs %d",
+			len(out1.Items), len(out2.Items))
+	}
+	for i := range out1.Items {
+		if out1.Items[i].ID != out2.Items[i].ID {
+			t.Errorf("position %d: svc1=%q svc2=%q — ranking differs across independent instances",
+				i, out1.Items[i].ID, out2.Items[i].ID)
+		}
+	}
+}
+
+// ── Ranking: different inputs → different order ───────────────────────────────
+
+// TestFeedService_Ranking_DifferentInputsDifferentOrder verifies that changing
+// the session seed (via seen_ids) causes a different ranked order for the
+// shared item pool.  The random component of the score is seeded from
+// seen_ids, so different seen_ids → different random scores → different order.
+func TestFeedService_Ranking_DifferentInputsDifferentOrder(t *testing.T) {
+	svc := newSvc()
+
+	// Two requests that differ only in seen_ids — the common pool is 5 cars.
+	out1, err := svc.GetFeed(ctx(), feed.GetFeedInput{
+		Category: strPtr("cars"),
+		SeenIDs:  []string{"car-07"},
+		Limit:    6,
+	})
+	if err != nil {
+		t.Fatalf("req1 error: %v", err)
+	}
+
+	out2, err := svc.GetFeed(ctx(), feed.GetFeedInput{
+		Category: strPtr("cars"),
+		SeenIDs:  []string{"car-06"},
+		Limit:    6,
+	})
+	if err != nil {
+		t.Fatalf("req2 error: %v", err)
+	}
+
+	// Collect common items in their respective ranked output order.
+	inOut2 := make(map[string]bool, len(out2.Items))
+	for _, it := range out2.Items {
+		inOut2[it.ID] = true
+	}
+
+	inOut1 := make(map[string]bool, len(out1.Items))
+	for _, it := range out1.Items {
+		inOut1[it.ID] = true
+	}
+
+	var order1, order2 []string
+	for _, it := range out1.Items {
+		if inOut2[it.ID] {
+			order1 = append(order1, it.ID)
+		}
+	}
+	for _, it := range out2.Items {
+		if inOut1[it.ID] {
+			order2 = append(order2, it.ID)
+		}
+	}
+
+	if len(order1) < 2 {
+		t.Skip("not enough common items to compare ordering — need at least 2")
+	}
+
+	sameOrder := len(order1) == len(order2)
+	if sameOrder {
+		for i := range order1 {
+			if order1[i] != order2[i] {
+				sameOrder = false
+				break
+			}
+		}
+	}
+	if sameOrder {
+		t.Error("ranking: expected different ordering for different seen_ids (seeds), but got identical order")
+	}
+}
+
+// ── Ranking: pagination remains correct ──────────────────────────────────────
+
+// TestFeedService_Ranking_PaginationNoDuplicates verifies that cursor-based
+// pagination remains correct after ranking is applied: every item in the pool
+// appears exactly once across all pages, and no item is duplicated.
+func TestFeedService_Ranking_PaginationNoDuplicates(t *testing.T) {
+	svc := newSvc()
+
+	seen := make(map[string]bool)
+	var cursor *string
+	total := 0
+	pageSize := 2
+
+	for page := 1; page <= 10; page++ {
+		out, err := svc.GetFeed(ctx(), feed.GetFeedInput{
+			Category: strPtr("houses"),
+			Cursor:   cursor,
+			Limit:    pageSize,
+		})
+		if err != nil {
+			t.Fatalf("page %d error: %v", page, err)
+		}
+		for _, it := range out.Items {
+			if seen[it.ID] {
+				t.Errorf("duplicate item %q on page %d (ranking broke pagination)", it.ID, page)
+			}
+			seen[it.ID] = true
+		}
+		total += len(out.Items)
+		cursor = out.NextCursor
+		if cursor == nil {
+			break
+		}
+	}
+
+	// 5 houses in the repository.
+	if total != 5 {
+		t.Errorf("expected 5 total house items across pages, got %d", total)
+	}
+}
+
+// ── Ranking: order is not plain ID-sort ───────────────────────────────────────
+
+// TestFeedService_Ranking_OrderDiffersFromIDSort verifies that ranking (and
+// shuffle) actually reorder items — the output is not simply the items in
+// ascending ID order.  With 7 cars and a seeded score, the probability that
+// the ranked order accidentally equals ID-sorted order is astronomically low.
+func TestFeedService_Ranking_OrderDiffersFromIDSort(t *testing.T) {
+	svc := newSvc()
+
+	out, err := svc.GetFeed(ctx(), feed.GetFeedInput{
+		Category: strPtr("cars"),
+		Limit:    7,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out.Items) != 7 {
+		t.Fatalf("expected 7 items, got %d", len(out.Items))
+	}
+
+	// ID-sorted order for cars is car-01 … car-07.
+	idSorted := []string{"car-01", "car-02", "car-03", "car-04", "car-05", "car-06", "car-07"}
+
+	identical := true
+	for i, it := range out.Items {
+		if it.ID != idSorted[i] {
+			identical = false
+			break
+		}
+	}
+	if identical {
+		t.Error("ranked output is identical to ID-sorted order — ranking/shuffle had no effect")
+	}
+}
