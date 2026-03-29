@@ -1,9 +1,11 @@
 package main
 
 import (
+	"luxe-backend/internal/feed"
 	"luxe-backend/internal/health"
 	"luxe-backend/internal/interaction"
 	"luxe-backend/internal/item"
+	"luxe-backend/internal/itemhandler"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -23,9 +25,10 @@ func main() {
 	interactionHandler := interaction.NewHandler(interactionSvc)
 	e.POST("/api/v1/interactions", interactionHandler.Create)
 
+	// Dependency graph: itemhandler → feed → item
 	itemRepo := item.NewInMemoryRepository()
-	itemSvc := item.NewService(itemRepo)
-	itemHandler := item.NewHandler(itemSvc)
+	feedSvc := feed.NewFeedService(itemRepo)
+	itemHandler := itemhandler.NewHandler(feedSvc)
 	e.GET("/api/v1/items", itemHandler.GetItems)
 
 	e.Logger.Fatal(e.Start(":8080"))

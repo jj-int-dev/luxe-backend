@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"luxe-backend/internal/feed"
 	"luxe-backend/internal/item"
+	"luxe-backend/internal/itemhandler"
 
 	"github.com/labstack/echo/v4"
 )
@@ -19,11 +21,11 @@ type itemsResponse struct {
 	NextCursor *string                  `json:"next_cursor"`
 }
 
-// newTestHandler wires up a real service with an in-memory repository.
-func newTestHandler() *item.Handler {
+// newTestHandler wires up the real feed service with an in-memory repository.
+func newTestHandler() *itemhandler.Handler {
 	repo := item.NewInMemoryRepository()
-	svc := item.NewService(repo)
-	return item.NewHandler(svc)
+	svc := feed.NewFeedService(repo)
+	return itemhandler.NewHandler(svc)
 }
 
 // getItems fires GET /api/v1/items with an optional raw query string (e.g. "category=cars&limit=5").
@@ -286,10 +288,10 @@ func TestGetItems_Returns200_EmptyArray_WhenNoCategoryMatches(t *testing.T) {
 }
 
 func TestGetItems_CursorNotInFilteredSet_Returns400(t *testing.T) {
-    rec := getItems(t, "category=cars&cursor=house-1")
-    if rec.Code != http.StatusBadRequest {
-        t.Errorf("expected 400, got %d", rec.Code)
-    }
+	rec := getItems(t, "category=cars&cursor=house-1")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
 }
 
 func TestGetItems_Returns400_WhenCategoryIsInvalid(t *testing.T) {
